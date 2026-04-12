@@ -16,6 +16,7 @@ MSG_REQ_HISTORY = 3
 MSG_HISTORY_DATA = 4
 MSG_SHARE_PEERS = 5
 
+
 class P2PChat:
     def __init__(self, ip, name):
         self.is_running = True
@@ -48,30 +49,32 @@ class P2PChat:
             pass
 
     def broadcast_udp(self):
-
         udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        udp_sock.bind((self.ip, 0))
         msg = f"{self.ip}:{self.name}".encode('utf-8')
-        try:
-            udp_sock.sendto(msg, ('255.255.255.255', UDP_PORT))
-        except Exception as e:
-            pass
-        finally:
-            udp_sock.close()
+
+        udp_sock.sendto(msg, ('127.255.255.255', UDP_PORT))
+        udp_sock.close()
 
     def listen_udp(self):
-
         udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
 
-            udp_sock.bind(('0.0.0.0', UDP_PORT))
-        except:
+        try:
+            udp_sock.bind((self.ip, UDP_PORT))
+        except Exception as e:
+            print(f"Ошибка бинда UDP (Windows): {e}")
             return
 
         while self.is_running:
-            data, addr = udp_sock.recvfrom(BUFFER_SIZE)
             try:
+                udp_sock.settimeout(1.0)
+                try:
+                    data, addr = udp_sock.recvfrom(BUFFER_SIZE)
+                except socket.timeout:
+                    continue
+
                 peer_info = data.decode('utf-8').split(":", 1)
                 peer_ip = peer_info[0]
 
@@ -86,14 +89,25 @@ class P2PChat:
             except:
                 pass
 
+        udp_sock.close()
+
     def start_tcp_server(self):
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server.bind((self.ip, TCP_PORT))
+        try:
+            server.bind((self.ip, TCP_PORT))
+        except OSError:
+            print(f"\n[КРИТИЧЕСКАЯ ОШИБКА] IP {self.ip} уже используется другим узлом!")
+            self.is_running = False
+            import os
+            os._exit(1)
+
         server.listen(10)
-        while True:
-            client_sock, addr = server.accept()
-            threading.Thread(target=self.handle_tcp_client, args=(client_sock, False), daemon=True).start()
+        while self.is_running:
+            try:
+                client_sock, addr = server.accept()
+                threading.Thread(target=self.handle_tcp_client, args=(client_sock, False), daemon=True).start()
+            except:
+                break
 
     def connect_to_peer(self, peer_ip):
         with self.lock:
@@ -127,6 +141,10 @@ class P2PChat:
 
                 if msg_type == MSG_NAME:
                     p_ip, p_name = payload.split(":", 1)
+                    if p_ip == self.ip:
+                        sock.close()
+                        return
+
                     peer_ip, peer_name = p_ip, p_name
 
                     with self.lock:
@@ -153,7 +171,6 @@ class P2PChat:
                         self.history_synced = True
                         self.send_to_peer(sock, MSG_REQ_HISTORY)
 
-                        #обмен пирами
                         with self.lock:
                             all_ips = list(self.peers.keys())
                             if self.ip not in all_ips: all_ips.append(self.ip)
@@ -164,7 +181,8 @@ class P2PChat:
 
                 elif msg_type == MSG_REQ_HISTORY:
                     with self.lock:
-                        clean_history = [line.replace(f"[Вы ({self.ip})]:", f"[{self.name} ({self.ip})]:") for line in self.history]
+                        clean_history = [line.replace(f"[Вы ({self.ip})]:", f"[{self.name} ({self.ip})]:") for line in
+                                         self.history]
                     self.send_to_peer(sock, MSG_HISTORY_DATA, json.dumps(clean_history))
 
                 elif msg_type == MSG_HISTORY_DATA:
@@ -175,12 +193,12 @@ class P2PChat:
                         print(f"--- КОНЕЦ АРХИВА ---\n> ", end="", flush=True)
 
                 elif msg_type == MSG_SHARE_PEERS:
-                        received_ips = json.loads(payload)
-                        for r_ip in received_ips:
-                            with self.lock:
-                                known = r_ip in self.peers
-                            if r_ip != self.ip and not known:
-                                threading.Thread(target=self.connect_to_peer, args=(r_ip,), daemon=True).start()
+                    received_ips = json.loads(payload)
+                    for r_ip in received_ips:
+                        with self.lock:
+                            known = r_ip in self.peers
+                        if r_ip != self.ip and not known:
+                            threading.Thread(target=self.connect_to_peer, args=(r_ip,), daemon=True).start()
         except:
             pass
         finally:
@@ -200,10 +218,10 @@ class P2PChat:
                 self.broadcast_udp()
                 for _ in range(50):
                     if not self.is_running: break
-                    time.sleep(0.1)
+                    time.sleep(0.3)
 
         threading.Thread(target=br_loop, daemon=True).start()
-        time.sleep(1)
+
         while True:
             try:
                 msg = input("")
@@ -214,7 +232,6 @@ class P2PChat:
                 if msg.lower() in ['exit', 'quit']:
                     self.is_running = False
                     print("\rЗавершение работы...")
-
                     with self.lock:
                         for p_ip in list(self.peers.keys()):
                             sock = self.peers[p_ip]["socket"]
@@ -223,8 +240,6 @@ class P2PChat:
                                 sock.close()
                             except:
                                 pass
-                        self.peers.clear()
-                    time.sleep(1.5)
                     break
 
                 self.add_history(f"[Вы ({self.ip})]: {msg}")
@@ -233,6 +248,7 @@ class P2PChat:
                         self.send_to_peer(p["socket"], MSG_TEXT, msg)
             except KeyboardInterrupt:
                 break
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
