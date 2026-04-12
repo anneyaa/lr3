@@ -115,6 +115,7 @@ class P2PChat:
                 return
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.bind((self.ip, 0))
             sock.settimeout(2.0)
             sock.connect((peer_ip, TCP_PORT))
             sock.settimeout(None)
